@@ -28,6 +28,8 @@ interface Message {
 export default function Chat() {
     const [activeUser, setActiveUser] = useState<User | null>(null);
     const [activeChannelId, setActiveChannelId] = useState<string | null>(null);
+    const [activeChannelName, setActiveChannelName] = useState<string | null>(null); // To store channel name
+    const [isChannelGlobal, setIsChannelGlobal] = useState(false); // To distinguish from DM
     const activeChannelIdRef = useRef<string | null>(null);
 
     useEffect(() => {
@@ -43,8 +45,17 @@ export default function Chat() {
     const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
     const [editContent, setEditContent] = useState('');
     const [menuOpen, setMenuOpen] = useState<string | null>(null);
+    const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    const emojis = [
+        { category: 'Caras', icons: ['😀', '😁', '😂', '🤣', '😃', '😄', '😅', '😆', '😉', '😊', '😋', '😎', '😍', '😘', '🥰', '😗', '😙', '😚', '☺️', '🙂', '🤗', '🤩'] },
+        { category: 'Gestos', icons: ['👍', '👎', '👌', '✌️', '🤞', '🤟', '🤘', '🤙', '🖐️', '✋', '🖖', '👋', '✍️', '👏', '🙌', '👐', '🙏', '🤝', '👂', '👀', '🧠'] },
+        { category: 'Corazones', icons: ['❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '💔', '❣️', '💕', '💞', '💓', '💗', '💖', '💘', '💝', '💟', '💌', '💢', '💥'] }
+    ];
 
     const [users, setUsers] = useState<User[]>([]);
+    const [channels, setChannels] = useState<any[]>([]); // New channels state
     const [onlineUsers, setOnlineUsers] = useState<string[]>([]);
     const notificationAudio = useRef<HTMLAudioElement | null>(null);
     const [notifications, setNotifications] = useState<Record<string, { count: number, lastMessage: string }>>({});
@@ -53,6 +64,17 @@ export default function Chat() {
     useEffect(() => {
         const storedUser = localStorage.getItem('user');
         if (storedUser) setCurrentUser(JSON.parse(storedUser));
+
+        fetch(`${API_URL}/chat/channels`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        })
+            .then(res => res.json())
+            .then(data => {
+                setChannels(data);
+                // If restore logic doesn't trigger, maybe we want to select General by default?
+                // But let the user decide.
+            })
+            .catch(err => console.error("Error loading channels", err));
 
         fetch(`${API_URL}/users`, {
             headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
@@ -65,11 +87,15 @@ export default function Chat() {
                 const savedChat = localStorage.getItem('activeChat');
                 if (savedChat && storedUser) {
                     try {
-                        const { userId, user } = JSON.parse(savedChat);
+                        const { userId, channelId, user, isChannel, name } = JSON.parse(savedChat);
                         const currentUserId = JSON.parse(storedUser).id;
 
-                        // Verify user still exists
-                        if (data.some((u: User) => u.id === userId)) {
+                        if (isChannel) {
+                            setActiveChannelId(channelId);
+                            setActiveChannelName(name);
+                            setIsChannelGlobal(true);
+                        } else if (data.some((u: User) => u.id === userId)) {
+                            // Verify user still exists
                             // Re-fetch the channel to ensure proper member validation
                             fetch(`${API_URL}/chat/direct`, {
                                 method: 'POST',
@@ -86,6 +112,8 @@ export default function Chat() {
                                 .then((channel: { id: string; name: string }) => {
                                     setActiveUser(user);
                                     setActiveChannelId(channel.id);
+                                    setActiveChannelName(null);
+                                    setIsChannelGlobal(false);
                                 })
                                 .catch(err => {
                                     console.error("Error restoring chat", err);
@@ -174,23 +202,34 @@ export default function Chat() {
     }, []);
 
     useEffect(() => {
-        if (!socket || !activeUser || !currentUser || !activeChannelId) return;
+        if (!socket || !currentUser || !activeChannelId) return;
 
         socket.emit('joinChannel', activeChannelId);
 
         // Save active chat to localStorage
-        localStorage.setItem('activeChat', JSON.stringify({
-            userId: activeUser.id,
-            channelId: activeChannelId,
-            user: activeUser
-        }));
+        if (isChannelGlobal) {
+            localStorage.setItem('activeChat', JSON.stringify({
+                channelId: activeChannelId,
+                name: activeChannelName,
+                isChannel: true
+            }));
+        } else if (activeUser) {
+            localStorage.setItem('activeChat', JSON.stringify({
+                userId: activeUser.id,
+                channelId: activeChannelId,
+                user: activeUser,
+                isChannel: false
+            }));
+        }
 
-        // Clear notifications for this user
-        setNotifications(prev => {
-            const updated = { ...prev };
-            delete updated[activeUser.id];
-            return updated;
-        });
+        // Clear notifications if it matches active chat
+        if (activeUser) {
+            setNotifications(prev => {
+                const updated = { ...prev };
+                delete updated[activeUser.id];
+                return updated;
+            });
+        }
 
         // Mark messages as read when joining
         if (socket && activeChannelId && currentUser) {
@@ -295,7 +334,7 @@ export default function Chat() {
             socket.off('messagesRead', handleMessagesRead);
             socket.off('exception');
         };
-    }, [socket, activeUser, activeChannelId, currentUser]);
+    }, [socket, activeUser, activeChannelId, currentUser, isChannelGlobal, activeChannelName]);
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -328,6 +367,24 @@ export default function Chat() {
 
         setInput('');
         setReplyingTo(null);
+        setShowEmojiPicker(false);
+    };
+
+    const addEmoji = (emoji: string) => {
+        const cursorPosition = inputRef.current?.selectionStart || 0;
+        const textBeforeCursor = input.substring(0, cursorPosition);
+        const textAfterCursor = input.substring(cursorPosition);
+
+        setInput(textBeforeCursor + emoji + textAfterCursor);
+
+        // Return focus to input and set cursor position after the emoji
+        setTimeout(() => {
+            if (inputRef.current) {
+                inputRef.current.focus();
+                const newPosition = cursorPosition + emoji.length;
+                inputRef.current.setSelectionRange(newPosition, newPosition);
+            }
+        }, 10);
     };
 
     const startEdit = (msg: Message) => {
@@ -390,8 +447,17 @@ export default function Chat() {
             .then((channel: { id: string; name: string }) => {
                 setActiveUser(targetUser);
                 setActiveChannelId(channel.id);
+                setActiveChannelName(null);
+                setIsChannelGlobal(false);
             })
             .catch(err => console.error("Error creating direct chat", err));
+    };
+
+    const handleChannelClick = (channel: any) => {
+        setActiveUser(null);
+        setActiveChannelId(channel.id);
+        setActiveChannelName(channel.name);
+        setIsChannelGlobal(true);
     };
 
 
@@ -419,7 +485,42 @@ export default function Chat() {
                     <div style={{ flex: 1, overflowY: 'auto' }}>
 
                         <div style={{ padding: '16px', paddingBottom: '8px' }}>
-                            <h3 style={{ fontWeight: '600', color: '#94a3b8', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Mensajes</h3>
+                            <h3 style={{ fontWeight: '600', color: '#94a3b8', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Canales</h3>
+                        </div>
+                        <div style={{ padding: '0 8px', marginBottom: '16px' }}>
+                            {channels.map(channel => {
+                                const isActive = activeChannelId === channel.id && isChannelGlobal;
+                                return (
+                                    <button
+                                        key={channel.id}
+                                        onClick={() => handleChannelClick(channel)}
+                                        style={{
+                                            width: '100%',
+                                            textAlign: 'left',
+                                            padding: '10px 12px',
+                                            borderRadius: '8px',
+                                            fontSize: '14px',
+                                            backgroundColor: isActive ? '#1e40af' : 'transparent',
+                                            color: '#cbd5e1',
+                                            border: 'none',
+                                            cursor: 'pointer',
+                                            marginBottom: '2px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '12px',
+                                        }}
+                                    >
+                                        <div style={{ width: '24px', height: '24px', borderRadius: '4px', backgroundColor: isActive ? '#2563eb' : '#334155', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', color: '#fff' }}>
+                                            #
+                                        </div>
+                                        <span style={{ fontWeight: '600', flex: 1 }}>{channel.name}</span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+
+                        <div style={{ padding: '16px', paddingBottom: '8px' }}>
+                            <h3 style={{ fontWeight: '600', color: '#94a3b8', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Mensajes Directos</h3>
                         </div>
                         <div style={{ padding: '0 8px' }}>
                             {users.filter(u => u.id !== currentUser?.id).map(user => {
@@ -494,7 +595,9 @@ export default function Chat() {
                 {/* Chat Area */}
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, backgroundColor: '#0f172a' }}>
                     <div style={{ height: '56px', borderBottom: '1px solid #334155', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 24px', backgroundColor: '#1e293b' }}>
-                        <span style={{ fontWeight: '700', color: '#f1f5f9' }}>{activeUser ? `${activeUser.firstName} ${activeUser.lastName}` : 'Selecciona un chat'}</span>
+                        <span style={{ fontWeight: '700', color: '#f1f5f9' }}>
+                            {isChannelGlobal ? `# ${activeChannelName}` : (activeUser ? `${activeUser.firstName} ${activeUser.lastName}` : 'Selecciona un chat')}
+                        </span>
                         <button
                             onClick={() => {
                                 if (confirm('¿Estás seguro de que quieres borrar todo el historial de este chat? Esta acción no se puede deshacer.')) {
@@ -672,8 +775,83 @@ export default function Chat() {
                                 </button>
                             </div>
                         )}
-                        <form onSubmit={sendMessage} style={{ display: 'flex', gap: '8px' }}>
+                        <form onSubmit={sendMessage} style={{ display: 'flex', gap: '8px', position: 'relative' }}>
+                            <div style={{ position: 'relative' }}>
+                                <button
+                                    type="button"
+                                    onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                                    style={{
+                                        padding: '0 12px',
+                                        height: '100%',
+                                        backgroundColor: '#1e293b',
+                                        border: '1px solid #334155',
+                                        borderRadius: '8px',
+                                        color: showEmojiPicker ? '#fbbf24' : '#94a3b8',
+                                        cursor: 'pointer',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        transition: 'all 0.2s'
+                                    }}
+                                >
+                                    <span className="material-symbols-outlined">sentiment_satisfied</span>
+                                </button>
+
+                                {showEmojiPicker && (
+                                    <>
+                                        <div
+                                            onClick={() => setShowEmojiPicker(false)}
+                                            style={{ position: 'fixed', inset: 0, zIndex: 50 }}
+                                        />
+                                        <div style={{
+                                            position: 'absolute',
+                                            bottom: 'calc(100% + 12px)',
+                                            left: 0,
+                                            width: '280px',
+                                            backgroundColor: '#1e293b',
+                                            border: '1px solid #334155',
+                                            borderRadius: '12px',
+                                            boxShadow: '0 10px 25px rgba(0,0,0,0.5)',
+                                            zIndex: 51,
+                                            overflow: 'hidden',
+                                            animation: 'slideUp 0.2s ease-out'
+                                        }}>
+                                            <div style={{ padding: '12px', maxHeight: '300px', overflowY: 'auto' }}>
+                                                {emojis.map((group) => (
+                                                    <div key={group.category} style={{ marginBottom: '12px' }}>
+                                                        <div style={{ fontSize: '11px', color: '#64748b', fontWeight: 'bold', marginBottom: '8px', textTransform: 'uppercase' }}>
+                                                            {group.category}
+                                                        </div>
+                                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '4px' }}>
+                                                            {group.icons.map((emoji) => (
+                                                                <button
+                                                                    key={emoji}
+                                                                    type="button"
+                                                                    onClick={() => addEmoji(emoji)}
+                                                                    style={{
+                                                                        padding: '4px',
+                                                                        fontSize: '20px',
+                                                                        background: 'none',
+                                                                        border: 'none',
+                                                                        cursor: 'pointer',
+                                                                        borderRadius: '4px',
+                                                                        transition: 'background 0.2s'
+                                                                    }}
+                                                                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#334155')}
+                                                                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+                                                                >
+                                                                    {emoji}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
+                            </div>
                             <input
+                                ref={inputRef}
                                 value={input} onChange={e => setInput(e.target.value)}
                                 placeholder={activeUser ? `Mensaje a ${activeUser.firstName}...` : 'Selecciona un usuario...'}
                                 style={{ flex: 1, padding: '12px 16px', borderRadius: replyingTo ? '0 0 8px 8px' : '8px', border: '1px solid #334155', backgroundColor: '#1e293b', color: '#f1f5f9', outline: 'none', fontSize: '14px' }}
@@ -693,6 +871,10 @@ export default function Chat() {
                 .group:hover .message-actions { opacity: 1 !important; }
                 @media (max-width: 768px) {
                     .message-actions { opacity: 0.8 !important; }
+                }
+                @keyframes slideUp {
+                    from { opacity: 0; transform: translateY(10px); }
+                    to { opacity: 1; transform: translateY(0); }
                 }
             `}</style>
         </MainLayout>
